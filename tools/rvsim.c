@@ -130,24 +130,23 @@ int getch(void);
 
 void usage(void) {
     printf(
-"Instruction Set Simulator for RV32IM, (c) 2020 Kuoping Hsu\n"
-"Usage: rvsim [-h] [-b n] [-m n] [-n n] [-p] [-l logfile] file\n\n"
-"       --help, -h              help\n"
-"       --membase n, -m n       memory base (in hex)\n"
-"       --memsize n, -n n       memory size (in Kb)\n"
-"       --branch n, -b n        branch penalty (default 2)\n"
-"       --single, -s            single RAM\n"
-"       --predict, -p           static branch prediction\n"
-"       --log file, -l file     generate log file\n"
-"\n"
-"       file                    the elf executable file\n"
-"\n"
+        "Instruction Set Simulator for RV32IM, (c) 2020 Kuoping Hsu\n"
+        "Usage: rvsim [-h] [-b n] [-m n] [-n n] [-p] [-l logfile] file\n\n"
+        "       --help, -h              help\n"
+        "       --membase n, -m n       memory base (in hex)\n"
+        "       --memsize n, -n n       memory size (in Kb)\n"
+        "       --branch n, -b n        branch penalty (default 2)\n"
+        "       --single, -s            single RAM\n"
+        "       --predict, -p           static branch prediction\n"
+        "       --log file, -l file     generate log file\n"
+        "\n"
+        "       file                    the elf executable file\n"
+        "\n"
     );
 }
 
 #ifdef MACOX
-void *aligned_malloc(int align, size_t size )
-{
+void *aligned_malloc(int align, size_t size ) {
     void *mem = malloc( size + (align-1) + sizeof(void*) );
 
     char *amem = ((char*)mem) + sizeof(void*);
@@ -157,8 +156,7 @@ void *aligned_malloc(int align, size_t size )
     return amem;
 }
 
-void aligned_free( void *mem )
-{
+void aligned_free( void *mem ) {
     free( ((void**)mem)[-1] );
 }
 #else
@@ -237,6 +235,47 @@ static void prog_exit(int exitcode) {
         printf("Program terminate\n");
     }
     exit(exitcode);
+}
+
+static inline int to_imm_cj(unsigned int n ) {
+    unsigned int m;
+    union {
+        unsigned int n;
+        struct {
+            unsigned int a0 : 1;  // 5
+            unsigned int a1 : 3;  // 3:1
+            unsigned int a2 : 1;  // 7
+            unsigned int a3 : 1;  // 6
+            unsigned int a4 : 1;  // 10
+            unsigned int a5 : 2;  // 9:8  ??
+            unsigned int a6 : 1;  // 4
+            unsigned int a7 : 1;  // 11
+        } m;
+    } r;
+    r.n = n;
+    m = (r.m.a7 << 11) | (r.m.a4 << 10) | (r.m.a5 << 8) | (r.m.a2 << 7) | (r.m.a3 << 6) 
+            | (r.m.a0 << 5) | (r.m.a6 << 4) | (r.m.a1 << 1);
+    return (int) ((r.m.a7) ? (m | 0xfffffc00) : m);
+}
+
+static inline int to_imm_cli(unsigned int n1, unsigned int n2) {
+    unsigned int m;
+    m = (n1 << 5) + n2;
+    return (int) ((n1) ? (m | 0xffffffe0) : m);
+}
+
+static inline int to_imm_cswsp(unsigned int n) {
+    unsigned int m;
+    union {
+        unsigned int n;
+        struct {
+            unsigned int a0 : 2;  // 7:6
+            unsigned int a1 : 4;  // 5:2 
+        } m;
+    } r;
+    r.n = n;
+    m = (r.m.a0 << 6) | (r.m.a1 << 2);
+    return (int)  (m & 0x000000fc);  // zero extend
 }
 
 // Use libbfd to read the elf file.
@@ -377,6 +416,7 @@ int csr_rw(int regs, int mode, int val, int update, int *result) {
 }
 
 int main(int argc, char **argv) {
+    
     FILE *ft = NULL;
     static int regs[32];
 
@@ -408,8 +448,10 @@ int main(int argc, char **argv) {
         {"memsize", 1, NULL, 'n'},
         {"single", 0, NULL, 's'}
     };
-
+    
+    
     while((c = getopt_long(argc, argv, optstring, opts, NULL)) != -1) {
+        printf("%d", c);
         switch(c) {
             case 'h':
                 usage();
@@ -451,6 +493,8 @@ int main(int argc, char **argv) {
                 return 1;
         }
     }
+
+
 
     if (optind < argc) {
         if ((file = malloc(MAXLEN)) == NULL) {
@@ -516,16 +560,25 @@ int main(int argc, char **argv) {
     ext_irq_next   = 0;
     mode           = MMODE;
 
+    int j = 0;
+    int word_addr;
+    int lower, higher;
+    int in_mem    = 0;  // instruction 
+    int cnt       = 0;
+    int c_cnt     = 0;
+    int chk_rv32c = 3;
+
+
     // Execution loop
     while(1) {
-        INST inst;
-
+        INST  inst;
+        CINST cinst;
         mtime_update = 0;
 
         //FIXME: to pass the compliance test, the destination PC should
         //       be aligned at short word.
         pc &= 0xfffffffe;
-
+        
         // keep x0 always zero
         regs[0] = 0;
 
@@ -547,14 +600,32 @@ int main(int argc, char **argv) {
             printf("PC 0x%08x out of range 0x%08x\n", pc, IPA2VA(isize));
             TRAP(TRAP_INST_FAIL, pc);
         }
-
-        if ((pc&2) != 0) {
+        
+        if ((pc&1) != 0) {
             printf("PC 0x%08x alignment error\n", pc);
             TRAP(TRAP_INST_ALIGN, pc);
         }
 
-        inst.inst = imem[IVA2PA(pc)/4];
 
+        word_addr = IVA2PA(pc)/4;
+
+        if (pc & 0x2) { // half word align
+            lower  = imem[word_addr];
+            higher = imem[word_addr + 1];
+            in_mem = ( (lower >> 16) & 0x0000FFFF)  | ((higher << 16 ) & 0xFFFF0000);
+        } else { // word align 
+            in_mem = imem[word_addr];
+        }
+        // inst.inst =  imem[IVA2PA(pc)/4];
+
+        chk_rv32c = in_mem & 0x3;
+        if (chk_rv32c == 3)
+            inst.inst = in_mem;
+        else 
+            cinst.cinst = in_mem & 0x0000ffff;
+            // printf("\n-->%8x\n", cinst.cinst);
+         
+        
         if ((csr.mtime.c >= csr.mtimecmp.c) &&
             (csr.mstatus & (1 << MIE)) && (csr.mie & (1 << MTIE)) &&
             (inst.r.op != OP_SYSTEM)) { // do not interrupt when system call and CSR R/W
@@ -586,591 +657,728 @@ int main(int argc, char **argv) {
         CYCLE_ADD(1);
 
         prev_pc = pc;
-        switch(inst.r.op) {
-            case OP_AUIPC : { // U-Type
-                regs[inst.u.rd] = pc + to_imm_u(inst.u.imm);
-                TIME_LOG; TRACE_LOG "%08x %08x x%02u (%s) <= 0x%08x\n", pc, inst.inst,
-                           inst.u.rd, regname[inst.u.rd], regs[inst.u.rd] TRACE_END;
-                break;
-            }
-            case OP_LUI   : { // U-Type
-                regs[inst.u.rd] = to_imm_u(inst.u.imm);
-                TIME_LOG; TRACE_LOG "%08x %08x x%02u (%s) <= 0x%08x\n", pc, inst.inst,
-                          inst.u.rd, regname[inst.u.rd], regs[inst.u.rd] TRACE_END;
-                break;
-            }
-            case OP_JAL   : { // J-Type
-                regs[inst.j.rd] = pc + 4;
-                TIME_LOG; TRACE_LOG "%08x %08x x%02u (%s) <= 0x%08x\n", pc, inst.inst,
-                          inst.j.rd, regname[inst.j.rd], regs[inst.j.rd] TRACE_END;
-                pc += to_imm_j(inst.j.imm);
-                if (to_imm_j(inst.j.imm) == 0) {
-                    printf("Warning: forever loop detected at PC 0x%08x\n", pc);
-                    prog_exit(1);
+        if (j > 20) break;
+        j++;
+        // if (pc == 0x2e) break;
+
+        printf("\n %d --- pc: %2x, ", chk_rv32c, pc);
+        if(chk_rv32c == 3) {
+            printf(" op: %2x,  inst: %8x ", inst.r.op, inst.inst); 
+            switch(inst.r.op) {
+                case OP_AUIPC : { // U-Type
+                    regs[inst.u.rd] = pc + to_imm_u(inst.u.imm);
+                    TIME_LOG; TRACE_LOG "%08x %08x x%02u (%s) <= 0x%08x\n", pc, inst.inst,
+                            inst.u.rd, regname[inst.u.rd], regs[inst.u.rd] TRACE_END;
+                    break;
                 }
-                if ((pc&2) == 0)
-                    CYCLE_ADD(branch_penalty);
-                continue;
-            }
-            case OP_JALR  : { // I-Type
-                int new_pc = pc + 4;
-                TIME_LOG; TRACE_LOG "%08x ", pc TRACE_END;
-                pc = regs[inst.i.rs1] + to_imm_i(inst.i.imm);
-                regs[inst.i.rd] = new_pc;
-                TRACE_LOG "%08x x%02u (%s) <= 0x%08x\n", inst.inst, inst.i.rd,
-                          regname[inst.i.rd], regs[inst.i.rd] TRACE_END;
-                if ((pc&2) == 0)
-                    CYCLE_ADD(branch_penalty);
-                continue;
-            }
-            case OP_BRANCH: { // B-Type
-                TIME_LOG; TRACE_LOG "%08x %08x\n", pc, inst.inst TRACE_END;
-                int offset = to_imm_b(inst.b.imm2, inst.b.imm1);
-                switch(inst.b.func3) {
-                    case OP_BEQ  :
-                        if (regs[inst.b.rs1] == regs[inst.b.rs2]) {
-                            pc += offset;
-                            if ((!branch_predict || offset > 0) && (pc&2) == 0)
-                                CYCLE_ADD(branch_penalty);
-                            continue;
-                        }
-                        break;
-                    case OP_BNE  :
-                        if (regs[inst.b.rs1] != regs[inst.b.rs2]) {
-                            pc += offset;
-                            if ((!branch_predict || offset > 0) && (pc&2) == 0)
-                                CYCLE_ADD(branch_penalty);
-                            continue;
-                        }
-                        break;
-                    case OP_BLT  :
-                        if (regs[inst.b.rs1] < regs[inst.b.rs2]) {
-                            pc += offset;
-                            if ((!branch_predict || offset > 0) && (pc&2) == 0)
-                                CYCLE_ADD(branch_penalty);
-                            continue;
-                        }
-                        break;
-                    case OP_BGE  :
-                        if (regs[inst.b.rs1] >= regs[inst.b.rs2]) {
-                            pc += offset;
-                            if ((!branch_predict || offset > 0) && (pc&2) == 0)
-                                CYCLE_ADD(branch_penalty);
-                            continue;
-                        }
-                        break;
-                    case OP_BLTU :
-                        if (((unsigned int)regs[inst.b.rs1]) < ((unsigned int)regs[inst.b.rs2])) {
-                            pc += offset;
-                            if ((!branch_predict || offset > 0) && (pc&2) == 0)
-                                CYCLE_ADD(branch_penalty);
-                            continue;
-                        }
-                        break;
-                    case OP_BGEU :
-                        if (((unsigned int)regs[inst.b.rs1]) >= ((unsigned int)regs[inst.b.rs2])) {
-                            pc += offset;
-                            if ((!branch_predict || offset > 0) && (pc&2) == 0)
-                                CYCLE_ADD(branch_penalty);
-                            continue;
-                        }
-                        break;
-                    default:
-                        printf("Illegal branch instruction at PC 0x%08x\n", pc);
-                        TRAP(TRAP_INST_ILL, inst.inst);
-                        continue;
+                case OP_LUI   : { // U-Type
+                    regs[inst.u.rd] = to_imm_u(inst.u.imm);
+                    TIME_LOG; TRACE_LOG "%08x %08x x%02u (%s) <= 0x%08x\n", pc, inst.inst,
+                            inst.u.rd, regname[inst.u.rd], regs[inst.u.rd] TRACE_END;
+                    break;
                 }
-                break;
-            }
-            case OP_LOAD  : { // I-Type
-                COUNTER counter;
-                int memdata;
-                int memaddr;
-                int data;
-                int address = regs[inst.i.rs1] + to_imm_i(inst.i.imm);
-                memaddr = address;
-                if (singleram) CYCLE_ADD(1);
-                TIME_LOG; TRACE_LOG "%08x %08x", pc, inst.inst TRACE_END;
-                if (address < DMEM_BASE || address > DMEM_BASE+DMEM_SIZE) {
-                    switch(address) {
-                        case MMIO_PUTC:
-                            data = 0;
+                case OP_JAL   : { // J-Type
+                    regs[inst.j.rd] = pc + 4;
+                    TIME_LOG; TRACE_LOG "%08x %08x x%02u (%s) <= 0x%08x\n", pc, inst.inst,
+                            inst.j.rd, regname[inst.j.rd], regs[inst.j.rd] TRACE_END;
+                    pc += to_imm_j(inst.j.imm);
+                    if (to_imm_j(inst.j.imm) == 0) {
+                        printf("Warning: forever loop detected at PC 0x%08x\n", pc);
+                        prog_exit(1);
+                    }
+                    if ((pc&1) == 0)
+                        CYCLE_ADD(branch_penalty);
+                    continue;
+                }
+                case OP_JALR  : { // I-Type
+                    int new_pc = pc + 4;
+                    TIME_LOG; TRACE_LOG "%08x ", pc TRACE_END;
+                    pc = regs[inst.i.rs1] + to_imm_i(inst.i.imm);
+                    regs[inst.i.rd] = new_pc;
+                    TRACE_LOG "%08x x%02u (%s) <= 0x%08x\n", inst.inst, inst.i.rd,
+                            regname[inst.i.rd], regs[inst.i.rd] TRACE_END;
+                    if ((pc&1) == 0)
+                        CYCLE_ADD(branch_penalty);
+                    continue;
+                }
+                case OP_BRANCH: { // B-Type
+                    TIME_LOG; TRACE_LOG "%08x %08x\n", pc, inst.inst TRACE_END;
+                    int offset = to_imm_b(inst.b.imm2, inst.b.imm1);
+                    switch(inst.b.func3) {
+                        case OP_BEQ  :
+                            if (regs[inst.b.rs1] == regs[inst.b.rs2]) {
+                                pc += offset;
+                                if ((!branch_predict || offset > 0) && (pc&2) == 0)
+                                    CYCLE_ADD(branch_penalty);
+                                continue;
+                            }
                             break;
-                        case MMIO_GETC:
-                            data = getch();
+                        case OP_BNE  :
+                            if (regs[inst.b.rs1] != regs[inst.b.rs2]) {
+                                pc += offset;
+                                if ((!branch_predict || offset > 0) && (pc&2) == 0)
+                                    CYCLE_ADD(branch_penalty);
+                                continue;
+                            }
                             break;
-                        case MMIO_EXIT:
-                            data = 0;
+                        case OP_BLT  :
+                            if (regs[inst.b.rs1] < regs[inst.b.rs2]) {
+                                pc += offset;
+                                if ((!branch_predict || offset > 0) && (pc&2) == 0)
+                                    CYCLE_ADD(branch_penalty);
+                                continue;
+                            }
                             break;
-                        case MMIO_MTIME:
-                            counter.c = csr.mtime.c - 1;
-                            data = counter.d.lo;
+                        case OP_BGE  :
+                            if (regs[inst.b.rs1] >= regs[inst.b.rs2]) {
+                                pc += offset;
+                                if ((!branch_predict || offset > 0) && (pc&2) == 0)
+                                    CYCLE_ADD(branch_penalty);
+                                continue;
+                            }
                             break;
-                        case MMIO_MTIME+4:
-                            counter.c = csr.mtime.c - 1;
-                            data = counter.d.hi;
+                        case OP_BLTU :
+                            if (((unsigned int)regs[inst.b.rs1]) < ((unsigned int)regs[inst.b.rs2])) {
+                                pc += offset;
+                                if ((!branch_predict || offset > 0) && (pc&2) == 0)
+                                    CYCLE_ADD(branch_penalty);
+                                continue;
+                            }
                             break;
-                        case MMIO_MTIMECMP:
-                            //csr.mip = csr.mip & ~(1 << MTIP);
-                            data = csr.mtimecmp.d.lo;
-                            break;
-                        case MMIO_MTIMECMP+4:
-                            //csr.mip = csr.mip & ~(1 << MTIP);
-                            data = csr.mtimecmp.d.hi;
-                            break;
-                        case MMIO_MSIP:
-                            data = csr.msip;
+                        case OP_BGEU :
+                            if (((unsigned int)regs[inst.b.rs1]) >= ((unsigned int)regs[inst.b.rs2])) {
+                                pc += offset;
+                                if ((!branch_predict || offset > 0) && (pc&2) == 0)
+                                    CYCLE_ADD(branch_penalty);
+                                continue;
+                            }
                             break;
                         default:
-                            // Check whether it is legal, if not,
-                            // leave it to the later judgment.
-                            if (inst.i.func3 == OP_LB ||
-                                inst.i.func3 == OP_LH ||
-                                inst.i.func3 == OP_LW ||
-                                inst.i.func3 == OP_LBU ||
-                                inst.i.func3 == OP_LHU) {
-                                TRACE_LOG "\n" TRACE_END;
-                                printf("Unknown address 0x%08x to read at PC 0x%08x\n",
-                                       address, pc);
-                                TRAP(TRAP_LD_FAIL, address);
-                                continue;
-                            } else {
-                                address = DVA2PA(address);
+                            printf("Illegal branch instruction at PC 0x%08x\n", pc);
+                            TRAP(TRAP_INST_ILL, inst.inst);
+                            continue;
+                    }
+                    break;
+                }
+                case OP_LOAD  : { // I-Type
+                    COUNTER counter;
+                    int memdata;
+                    int memaddr;
+                    int data;
+                    int address = regs[inst.i.rs1] + to_imm_i(inst.i.imm);
+                    memaddr = address;
+                    if (singleram) CYCLE_ADD(1);
+                    TIME_LOG; TRACE_LOG "%08x %08x", pc, inst.inst TRACE_END;
+                    if (address < DMEM_BASE || address > DMEM_BASE+DMEM_SIZE) {
+                        switch(address) {
+                            case MMIO_PUTC:
                                 data = 0;
-                            }
-                    }
-                } else {
-                    address = DVA2PA(address);
-                    data = dmem[address/4];
-                }
-                memdata = data;
-                switch(inst.i.func3) {
-                    case OP_LB  : // fall through
-                    case OP_LBU : data = (data >> ((address&3)*8))&0xff;
-                                  if (inst.i.func3 == OP_LB && (data&0x80))
-                                    data |= 0xffffff00;
-                                  break;
-                    case OP_LH  : // fall through
-                    case OP_LHU : if (address&1) {
+                                break;
+                            case MMIO_GETC:
+                                data = getch();
+                                break;
+                            case MMIO_EXIT:
+                                data = 0;
+                                break;
+                            case MMIO_MTIME:
+                                counter.c = csr.mtime.c - 1;
+                                data = counter.d.lo;
+                                break;
+                            case MMIO_MTIME+4:
+                                counter.c = csr.mtime.c - 1;
+                                data = counter.d.hi;
+                                break;
+                            case MMIO_MTIMECMP:
+                                //csr.mip = csr.mip & ~(1 << MTIP);
+                                data = csr.mtimecmp.d.lo;
+                                break;
+                            case MMIO_MTIMECMP+4:
+                                //csr.mip = csr.mip & ~(1 << MTIP);
+                                data = csr.mtimecmp.d.hi;
+                                break;
+                            case MMIO_MSIP:
+                                data = csr.msip;
+                                break;
+                            default:
+                                // Check whether it is legal, if not,
+                                // leave it to the later judgment.
+                                if (inst.i.func3 == OP_LB ||
+                                    inst.i.func3 == OP_LH ||
+                                    inst.i.func3 == OP_LW ||
+                                    inst.i.func3 == OP_LBU ||
+                                    inst.i.func3 == OP_LHU) {
                                     TRACE_LOG "\n" TRACE_END;
-                                    printf("Unalignment address 0x%08x to read at 0x%08x\n",
-                                            DPA2VA(address), pc);
-                                    TRAP(TRAP_LD_ALIGN, DPA2VA(address));
+                                    printf("Unknown address 0x%08x to read at PC 0x%08x\n",
+                                        address, pc);
+                                    TRAP(TRAP_LD_FAIL, address);
                                     continue;
-                                  }
-                                  data = (address&2) ? ((data>>16)&0xffff) : (data &0xffff);
-                                  if (inst.i.func3 == OP_LH && (data&0x8000))
-                                    data |= 0xffff0000;
-                                  break;
-                    case OP_LW  : if (address&3) {
-                                    TRACE_LOG "\n" TRACE_END;
-                                    printf("Unalignment address 0x%08x to read at 0x%08x\n",
-                                            DPA2VA(address), pc);
-                                    TRAP(TRAP_LD_ALIGN, DPA2VA(address));
-                                    continue;
-                                  }
-                                  break;
-                    default: TRACE_LOG " read 0x%08x => 0x%08x, x%02u (%s) <= 0x%08x\n",
-                                       memaddr, memdata, inst.i.rd,
-                                       regname[inst.i.rd], 0 TRACE_END;
-                             printf("Illegal load instruction at PC 0x%08x\n", pc);
-                             TRAP(TRAP_INST_ILL, inst.inst);
-                             continue;
-                }
-                regs[inst.i.rd] = data;
-                TRACE_LOG " read 0x%08x => 0x%08x, x%02u (%s) <= 0x%08x\n",
-                          memaddr, memdata, inst.i.rd,
-                          regname[inst.i.rd], regs[inst.i.rd] TRACE_END;
-                break;
-            }
-            case OP_STORE : { // S-Type
-                int address = regs[inst.s.rs1] +
-                              to_imm_s(inst.s.imm2, inst.s.imm1);
-                int data = regs[inst.s.rs2];
-                int mask = (inst.s.func3 == OP_SB) ? 0xff :
-                           (inst.s.func3 == OP_SH) ? 0xffff :
-                           (inst.s.func3 == OP_SW) ? 0xffffffff :
-                           0xffffffff;
-                if (singleram) CYCLE_ADD(1);
-                if (address < DMEM_BASE || address > DMEM_BASE+DMEM_SIZE) {
-                    if (inst.i.func3 == OP_SB ||
-                        inst.i.func3 == OP_SH ||
-                        inst.i.func3 == OP_SW) {
-                        TIME_LOG; TRACE_LOG "%08x %08x", pc, inst.inst TRACE_END;
+                                } else {
+                                    address = DVA2PA(address);
+                                    data = 0;
+                                }
+                        }
+                    } else {
+                        address = DVA2PA(address);
+                        data = dmem[address/4];
                     }
-                    switch(address) {
-                        case MMIO_PUTC:
-                            putchar((char)data);
-                            fflush(stdout);
-                            break;
-                        case MMIO_GETC:
-                            break;
-                        case MMIO_EXIT:
-                            TRACE_LOG " write 0x%08x <= 0x%08x\n",
-                                      address, (data & mask) TRACE_END;
-                            prog_exit(data);
-                            break;
-                        case MMIO_MTIME:
-                            csr.mtime.d.lo = (csr.mtime.d.lo & ~mask) | data;
-                            csr.mtime.c--;
-                            mtime_update = 1;
-                            break;
-                        case MMIO_MTIME+4:
-                            csr.mtime.d.hi = (csr.mtime.d.hi & ~mask) | data;
-                            mtime_update = 1;
-                            break;
-                        case MMIO_MTIMECMP:
-                            csr.mtimecmp.d.lo = (csr.mtimecmp.d.lo & ~mask) | data;
-                            break;
-                        case MMIO_MTIMECMP+4:
-                            csr.mtimecmp.d.hi = (csr.mtimecmp.d.hi & ~mask) | data;
-                            break;
-                        case MMIO_MSIP:
-                            csr.msip = (csr.msip & ~mask) | data;
-                            break;
-                        default:
-                            // Check whether it is legal, if not,
-                            // leave it to the later judgment.
-                            if (inst.i.func3 == OP_SB ||
-                                inst.i.func3 == OP_SH ||
-                                inst.i.func3 == OP_SW) {
-                                printf("Unknown address 0x%08x to write at 0x%08x\n",
-                                       address, pc);
-                                TRACE_LOG "\n" TRACE_END;
-                                TRAP(TRAP_ST_FAIL, address);
+                    memdata = data;
+                    switch(inst.i.func3) {
+                        case OP_LB  : // fall through
+                        case OP_LBU : data = (data >> ((address&3)*8))&0xff;
+                                    if (inst.i.func3 == OP_LB && (data&0x80))
+                                        data |= 0xffffff00;
+                                    break;
+                        case OP_LH  : // fall through
+                        case OP_LHU : if (address&1) {
+                                        TRACE_LOG "\n" TRACE_END;
+                                        printf("Unalignment address 0x%08x to read at 0x%08x\n",
+                                                DPA2VA(address), pc);
+                                        TRAP(TRAP_LD_ALIGN, DPA2VA(address));
+                                        continue;
+                                    }
+                                    data = (address&2) ? ((data>>16)&0xffff) : (data &0xffff);
+                                    if (inst.i.func3 == OP_LH && (data&0x8000))
+                                        data |= 0xffff0000;
+                                    break;
+                        case OP_LW  : if (address&3) {
+                                        TRACE_LOG "\n" TRACE_END;
+                                        printf("Unalignment address 0x%08x to read at 0x%08x\n",
+                                                DPA2VA(address), pc);
+                                        TRAP(TRAP_LD_ALIGN, DPA2VA(address));
+                                        continue;
+                                    }
+                                    break;
+                        default: TRACE_LOG " read 0x%08x => 0x%08x, x%02u (%s) <= 0x%08x\n",
+                                        memaddr, memdata, inst.i.rd,
+                                        regname[inst.i.rd], 0 TRACE_END;
+                                printf("Illegal load instruction at PC 0x%08x\n", pc);
+                                TRAP(TRAP_INST_ILL, inst.inst);
                                 continue;
-                            }
                     }
-                    if (inst.i.func3 == OP_SB ||
-                        inst.i.func3 == OP_SH ||
-                        inst.i.func3 == OP_SW) {
-                        TRACE_LOG " write 0x%08x <= 0x%08x\n",
-                              address, (data & mask) TRACE_END;
-                        pc += 4;
-                        continue;
-                    }
+                    regs[inst.i.rd] = data;
+                    TRACE_LOG " read 0x%08x => 0x%08x, x%02u (%s) <= 0x%08x\n",
+                            memaddr, memdata, inst.i.rd,
+                            regname[inst.i.rd], regs[inst.i.rd] TRACE_END;
+                    break;
                 }
-                TIME_LOG; TRACE_LOG "%08x %08x", pc, inst.inst TRACE_END;
-                address = DVA2PA(address);
-                switch(inst.s.func3) {
-                    case OP_SB : dmem[address/4] =
-                                    (dmem[address/4]&~(0xff<<((address&3)*8))) |
-                                    ((data & 0xff)<<((address&3)*8));
-                                 break;
-                    case OP_SH : if (address&1) {
+                case OP_STORE : { // S-Type
+                    int address = regs[inst.s.rs1] +
+                                to_imm_s(inst.s.imm2, inst.s.imm1);
+                    int data = regs[inst.s.rs2];
+                    int mask = (inst.s.func3 == OP_SB) ? 0xff :
+                            (inst.s.func3 == OP_SH) ? 0xffff :
+                            (inst.s.func3 == OP_SW) ? 0xffffffff :
+                            0xffffffff;
+                    if (singleram) CYCLE_ADD(1);
+                    if (address < DMEM_BASE || address > DMEM_BASE+DMEM_SIZE) {
+                        if (inst.i.func3 == OP_SB ||
+                            inst.i.func3 == OP_SH ||
+                            inst.i.func3 == OP_SW) {
+                            TIME_LOG; TRACE_LOG "%08x %08x", pc, inst.inst TRACE_END;
+                        }
+                        switch(address) {
+                            case MMIO_PUTC:
+                                putchar((char)data);
+                                fflush(stdout);
+                                break;
+                            case MMIO_GETC:
+                                break;
+                            case MMIO_EXIT:
+                                TRACE_LOG " write 0x%08x <= 0x%08x\n",
+                                        address, (data & mask) TRACE_END;
+                                prog_exit(data);
+                                break;
+                            case MMIO_MTIME:
+                                csr.mtime.d.lo = (csr.mtime.d.lo & ~mask) | data;
+                                csr.mtime.c--;
+                                mtime_update = 1;
+                                break;
+                            case MMIO_MTIME+4:
+                                csr.mtime.d.hi = (csr.mtime.d.hi & ~mask) | data;
+                                mtime_update = 1;
+                                break;
+                            case MMIO_MTIMECMP:
+                                csr.mtimecmp.d.lo = (csr.mtimecmp.d.lo & ~mask) | data;
+                                break;
+                            case MMIO_MTIMECMP+4:
+                                csr.mtimecmp.d.hi = (csr.mtimecmp.d.hi & ~mask) | data;
+                                break;
+                            case MMIO_MSIP:
+                                csr.msip = (csr.msip & ~mask) | data;
+                                break;
+                            default:
+                                // Check whether it is legal, if not,
+                                // leave it to the later judgment.
+                                if (inst.i.func3 == OP_SB ||
+                                    inst.i.func3 == OP_SH ||
+                                    inst.i.func3 == OP_SW) {
+                                    printf("Unknown address 0x%08x to write at 0x%08x\n",
+                                        address, pc);
                                     TRACE_LOG "\n" TRACE_END;
-                                    printf("Unalignment address 0x%08x to write at 0x%08x\n",
-                                            DPA2VA(address), pc);
-                                    TRAP(TRAP_ST_ALIGN, DPA2VA(address));
+                                    TRAP(TRAP_ST_FAIL, address);
                                     continue;
-                                 }
-                                 dmem[address/4] = (address&2) ?
-                                    ((dmem[address/4]&0xffff)|(data << 16)) :
-                                    ((dmem[address/4]&0xffff0000)|(data&0xffff));
-                                 break;
-                    case OP_SW : if (address&3) {
-                                    TRACE_LOG "\n" TRACE_END;
-                                    printf("Unalignment address 0x%08x to write at 0x%08x\n",
-                                            DPA2VA(address), pc);
-                                    TRAP(TRAP_ST_ALIGN, DPA2VA(address));
-                                    continue;
-                                 }
-                                 dmem[address/4] = data;
-                                 break;
-                    default: printf("Illegal store instruction at PC 0x%08x\n", pc);
-                             TRACE_LOG "\n" TRACE_END;
-                             TRAP(TRAP_INST_ILL, inst.inst);
-                             continue;
-                }
-                TRACE_LOG " write 0x%08x <= 0x%08x\n", DPA2VA(address), (data & mask) TRACE_END;
-                break;
-            }
-            case OP_ARITHI: { // I-Type
-                switch(inst.i.func3) {
-                    case OP_ADD  : regs[inst.i.rd] = regs[inst.i.rs1] + to_imm_i(inst.i.imm);
-                                   break;
-                    case OP_SLT  : regs[inst.i.rd] = regs[inst.i.rs1] < to_imm_i(inst.i.imm) ? 1 : 0;
-                                   break;
-                    case OP_SLTU : //FIXME: to pass compliance test, the IMM should be singed
-                                   //extension, and compare with unsigned.
-                                   //regs[inst.i.rd] = ((unsigned int)regs[inst.i.rs1]) <
-                                   //                ((unsigned int)to_imm_iu(inst.i.imm)) ? 1 : 0;
-                                   regs[inst.i.rd] = ((unsigned int)regs[inst.i.rs1]) <
-                                                     ((unsigned int)to_imm_i(inst.i.imm)) ? 1 : 0;
-                                   break;
-                    case OP_XOR  : regs[inst.i.rd] = regs[inst.i.rs1] ^ to_imm_i(inst.i.imm);
-                                   break;
-                    case OP_OR   : regs[inst.i.rd] = regs[inst.i.rs1] | to_imm_i(inst.i.imm);
-                                   break;
-                    case OP_AND  : regs[inst.i.rd] = regs[inst.i.rs1] & to_imm_i(inst.i.imm);
-                                   break;
-                    case OP_SLL  : regs[inst.i.rd] = regs[inst.i.rs1] << (inst.i.imm&0x1f);
-                                   break;
-                    case OP_SR   : if (inst.r.func7 == 0)
-                                       regs[inst.i.rd] = ((unsigned int)regs[inst.i.rs1]) >>
-                                                         (inst.i.imm&0x1f);
-                                   else
-                                       regs[inst.i.rd] = regs[inst.i.rs1] >> (inst.i.imm&0x1f);
-                                   break;
-                    default: printf("Unknown instruction at 0x%08x\n", pc);
-                             TRAP(TRAP_INST_ILL, inst.inst);
-                             continue;
-                }
-                TIME_LOG; TRACE_LOG "%08x %08x x%02u (%s) <= 0x%08x\n",
-                          pc, inst.inst, inst.i.rd, regname[inst.i.rd],
-                          regs[inst.i.rd] TRACE_END;
-                break;
-            }
-            case OP_ARITHR: { // R-Type
-                if (inst.r.func7 == 1) { // RV32M Multiply Extension
-                    switch(inst.r.func3) {
-                        case OP_MUL   : regs[inst.r.rd] = regs[inst.r.rs1] *
-                                                          regs[inst.r.rs2];
-                                        break;
-                        case OP_MULH  : {
-                                        union {
-                                            long long l;
-                                            struct { int l, h; } n;
-                                        } a, b, r;
-                                        a.l = (long long)regs[inst.r.rs1];
-                                        b.l = (long long)regs[inst.r.rs2];
-                                        r.l = a.l * b.l;
-                                        regs[inst.r.rd] = r.n.h;
-                                        }
-                                        break;
-                        case OP_MULSU : {
-                                        union {
-                                            long long l;
-                                            struct { int l, h; } n;
-                                        } a, b, r;
-                                        a.l = (long long)regs[inst.r.rs1];
-                                        b.n.l = regs[inst.r.rs2];
-                                        b.n.h = 0;
-                                        r.l = a.l * b.l;
-                                        regs[inst.r.rd] = r.n.h;
-                                        }
-                                        break;
-                        case OP_MULU  : {
-                                        union {
-                                            long long l;
-                                            struct { int l, h; } n;
-                                        } a, b, r;
-                                        a.n.l = regs[inst.r.rs1]; a.n.h = 0;
-                                        b.n.l = regs[inst.r.rs2]; b.n.h = 0;
-                                        r.l = ((unsigned long long)a.l) *
-                                              ((unsigned long long)b.l);
-                                        regs[inst.r.rd] = r.n.h;
-                                        }
-                                        break;
-                        case OP_DIV   : if (regs[inst.r.rs2])
-                                            regs[inst.r.rd] = (int)(((long long)regs[inst.r.rs1]) /
-                                                                   regs[inst.r.rs2]);
-                                        else
-                                            regs[inst.r.rd] = 0xffffffff;
-                                        break;
-                        case OP_DIVU  : if (regs[inst.r.rs2])
-                                            regs[inst.r.rd] = (int)(((unsigned)regs[inst.r.rs1]) /
-                                                                    ((unsigned)regs[inst.r.rs2]));
-                                        else
-                                            regs[inst.r.rd] = 0xffffffff;
-                                        break;
-                        case OP_REM   : if (regs[inst.r.rs2])
-                                            regs[inst.r.rd] = (int)(((long long)regs[inst.r.rs1]) %
-                                                                    regs[inst.r.rs2]);
-                                        else
-                                            regs[inst.r.rd] = regs[inst.r.rs1];
-                                        break;
-                        case OP_REMU  : if (regs[inst.r.rs2])
-                                            regs[inst.r.rd] = (int)(((unsigned)regs[inst.r.rs1]) %
-                                                                    ((unsigned)regs[inst.r.rs2]));
-                                        else
-                                            regs[inst.r.rd] = regs[inst.r.rs1];
-                                        break;
-                        default: printf("Unknown instruction at 0x%08x\n", pc);
-                                 TRAP(TRAP_INST_ILL, inst.inst);
-                                 continue;
+                                }
+                        }
+                        if (inst.i.func3 == OP_SB ||
+                            inst.i.func3 == OP_SH ||
+                            inst.i.func3 == OP_SW) {
+                            TRACE_LOG " write 0x%08x <= 0x%08x\n",
+                                address, (data & mask) TRACE_END;
+                            pc += 4;
+                            continue;
+                        }
                     }
-                } else {
-                    switch(inst.r.func3) {
-                        case OP_ADD  : if (inst.r.func7 == 0)
-                                           regs[inst.r.rd] = regs[inst.r.rs1] + regs[inst.r.rs2];
-                                       else
-                                           regs[inst.r.rd] = regs[inst.r.rs1] - regs[inst.r.rs2];
-                                       break;
-                        case OP_SLL  : regs[inst.r.rd] = regs[inst.r.rs1] << regs[inst.r.rs2];
-                                       break;
-                        case OP_SLT  : regs[inst.r.rd] = regs[inst.r.rs1] < regs[inst.r.rs2] ?
-                                                         1 : 0;
-                                       break;
-                        case OP_SLTU : regs[inst.r.rd] = ((unsigned int)regs[inst.r.rs1]) <
-                                            ((unsigned int)regs[inst.r.rs2]) ? 1 : 0;
-                                       break;
-                        case OP_XOR  : regs[inst.r.rd] = regs[inst.r.rs1] ^ regs[inst.r.rs2];
-                                       break;
+                    TIME_LOG; TRACE_LOG "%08x %08x", pc, inst.inst TRACE_END;
+                    address = DVA2PA(address);
+                    switch(inst.s.func3) {
+                        case OP_SB : dmem[address/4] =
+                                        (dmem[address/4]&~(0xff<<((address&3)*8))) |
+                                        ((data & 0xff)<<((address&3)*8));
+                                    break;
+                        case OP_SH : if (address&1) {
+                                        TRACE_LOG "\n" TRACE_END;
+                                        printf("Unalignment address 0x%08x to write at 0x%08x\n",
+                                                DPA2VA(address), pc);
+                                        TRAP(TRAP_ST_ALIGN, DPA2VA(address));
+                                        continue;
+                                    }
+                                    dmem[address/4] = (address&2) ?
+                                        ((dmem[address/4]&0xffff)|(data << 16)) :
+                                        ((dmem[address/4]&0xffff0000)|(data&0xffff));
+                                    break;
+                        case OP_SW : if (address&3) {
+                                        TRACE_LOG "\n" TRACE_END;
+                                        printf("Unalignment address 0x%08x to write at 0x%08x\n",
+                                                DPA2VA(address), pc);
+                                        TRAP(TRAP_ST_ALIGN, DPA2VA(address));
+                                        continue;
+                                    }
+                                    dmem[address/4] = data;
+                                    break;
+                        default: printf("Illegal store instruction at PC 0x%08x\n", pc);
+                                TRACE_LOG "\n" TRACE_END;
+                                TRAP(TRAP_INST_ILL, inst.inst);
+                                continue;
+                    }
+                    TRACE_LOG " write 0x%08x <= 0x%08x\n", DPA2VA(address), (data & mask) TRACE_END;
+                    break;
+                }
+                case OP_ARITHI: { // I-Type
+                    switch(inst.i.func3) {
+                        case OP_ADD  : regs[inst.i.rd] = regs[inst.i.rs1] + to_imm_i(inst.i.imm);
+                                    break;
+                        case OP_SLT  : regs[inst.i.rd] = regs[inst.i.rs1] < to_imm_i(inst.i.imm) ? 1 : 0;
+                                    break;
+                        case OP_SLTU : //FIXME: to pass compliance test, the IMM should be singed
+                                    //extension, and compare with unsigned.
+                                    //regs[inst.i.rd] = ((unsigned int)regs[inst.i.rs1]) <
+                                    //                ((unsigned int)to_imm_iu(inst.i.imm)) ? 1 : 0;
+                                    regs[inst.i.rd] = ((unsigned int)regs[inst.i.rs1]) <
+                                                        ((unsigned int)to_imm_i(inst.i.imm)) ? 1 : 0;
+                                    break;
+                        case OP_XOR  : regs[inst.i.rd] = regs[inst.i.rs1] ^ to_imm_i(inst.i.imm);
+                                    break;
+                        case OP_OR   : regs[inst.i.rd] = regs[inst.i.rs1] | to_imm_i(inst.i.imm);
+                                    break;
+                        case OP_AND  : regs[inst.i.rd] = regs[inst.i.rs1] & to_imm_i(inst.i.imm);
+                                    break;
+                        case OP_SLL  : regs[inst.i.rd] = regs[inst.i.rs1] << (inst.i.imm&0x1f);
+                                    break;
                         case OP_SR   : if (inst.r.func7 == 0)
-                                           regs[inst.r.rd] = ((unsigned int)regs[inst.r.rs1]) >>
-                                                             regs[inst.r.rs2];
-                                       else
-                                           regs[inst.r.rd] = regs[inst.r.rs1] >> regs[inst.r.rs2];
-                                       break;
-                        case OP_OR   : regs[inst.r.rd] = regs[inst.r.rs1] | regs[inst.r.rs2];
-                                       break;
-                        case OP_AND  : regs[inst.r.rd] = regs[inst.r.rs1] & regs[inst.r.rs2];
-                                       break;
+                                        regs[inst.i.rd] = ((unsigned int)regs[inst.i.rs1]) >>
+                                                            (inst.i.imm&0x1f);
+                                    else
+                                        regs[inst.i.rd] = regs[inst.i.rs1] >> (inst.i.imm&0x1f);
+                                    break;
                         default: printf("Unknown instruction at 0x%08x\n", pc);
-                                 TRAP(TRAP_INST_ILL, inst.inst);
-                                 continue;
+                                TRAP(TRAP_INST_ILL, inst.inst);
+                                continue;
                     }
-                }
-                TIME_LOG; TRACE_LOG "%08x %08x x%02u (%s) <= 0x%08x\n",
-                          pc, inst.inst, inst.r.rd, regname[inst.r.rd],
-                          regs[inst.r.rd] TRACE_END;
-                break;
-            }
-            case OP_FENCE : {
-                TIME_LOG; TRACE_LOG "%08x %08x\n", pc, inst.inst TRACE_END;
-                break;
-            }
-            case OP_SYSTEM: { // I-Type
-                int val;
-                int update;
-                int csr_op = 0;
-                int csr_type;
-                // RDCYCLE, RDTIME and RDINSTRET are read only
-                switch(inst.i.func3) {
-                    case OP_ECALL  : TIME_LOG; TRACE_LOG "%08x %08x\n", pc, inst.inst TRACE_END;
-                                     switch (inst.i.imm & 3) {
-                                        case 0: // ecall
-                                            switch(regs[A7]) { // function argument A7/X17
-                                               case SYS_EXIT:
-                                                   prog_exit(0);
-                                                   break;
-                                               case SYS_READ:
-                                                   if (regs[A0] == STDIN) {
-                                                       char *ptr = (char*)dmem;
-                                                       int i = 0;
-                                                       char c = 0;
-                                                       do {
-                                                           c = getch();
-                                                           ptr[DVA2PA(regs[A1])+i] = c;
-                                                       } while(++i<regs[A2] && c != '\n');
-                                                   }
-                                                   break;
-                                               case SYS_WRITE:
-                                                   if (regs[A0] == STDOUT) {
-                                                       char *ptr = (char*)dmem;
-                                                       int i;
-                                                       for(i=0; i<regs[A2]; i++) {
-                                                           char c = ptr[DVA2PA(regs[A1])+i];
-                                                           putchar(c);
-                                                       }
-                                                       fflush(stdout);
-                                                   }
-                                                   break;
-                                               case SYS_DUMP: {
-                                                       FILE *fp;
-                                                       int i;
-                                                       if ((fp = fopen("dump.txt", "w")) == NULL) {
-                                                           printf("Create dump.txt fail\n");
-                                                           exit(1);
-                                                       }
-                                                       if ((regs[A0] & 3) != 0 || (regs[A1] & 3) != 0) {
-                                                           printf("Alignment error on memory dumping.\n");
-                                                           exit(1);
-                                                       }
-                                                       for(i = DVA2PA(regs[A0])/4;
-                                                           i < DVA2PA(regs[A1])/4; i++) {
-                                                           fprintf(fp, "%08x\n", dmem[i]);
-                                                       }
-                                                       fclose(fp);
-                                                   }
-                                                   break;
-                                               default:
-                                                   break;
-                                            }
-                                            TRAP(TRAP_ECALL, 0);
-                                            continue;
-                                        case 1: // ebreak
-                                            TRAP(TRAP_BREAK, 0);
-                                            continue;
-                                        case 2: // mret
-                                            pc = csr.mepc;
-                                            // mstatus.mie = mstatus.mpie
-                                            csr.mstatus = (csr.mstatus & (1 << MPIE)) ?
-                                                          (csr.mstatus | (1 << MIE)) :
-                                                          (csr.mstatus & ~(1 << MIE));
-                                            // mstatus.mpie = 1
-                                            if ((pc&2) == 0)
-                                                CYCLE_ADD(branch_penalty);
-                                            continue;
-                                        default:
-                                            printf("Illegal system call at PC 0x%08x\n", pc);
-                                            TRAP(TRAP_INST_ILL, 0);
-                                            continue;
-                                     }
-                    case OP_CSRRWI : csr_op = 1;
-                                     val = inst.i.rs1;
-                                     update = 1;
-                                     csr_type = OP_CSRRW;
-                                     break;
-                    // If the zimm[4:0] field is zero, then these instructions will not write
-                    // to the CSR
-                    case OP_CSRRW  : csr_op = 1;
-                                     val = regs[inst.i.rs1];
-                                     update = 1;
-                                     csr_type = OP_CSRRW;
-                                     break;
-                    // For both CSRRS and CSRRC, if rs1=x0, then the instruction will not
-                    // write to the CSR at all
-                    case OP_CSRRSI : csr_op = 1;
-                                     val = inst.i.rs1;
-                                     update = (inst.i.rs1 == 0) ? 0 : 1;
-                                     csr_type = OP_CSRRS;
-                                     break;
-                    case OP_CSRRS  : csr_op = 1;
-                                     val = regs[inst.i.rs1];
-                                     update = (inst.i.rs1 == 0) ? 0 : 1;
-                                     csr_type = OP_CSRRS;
-                                     break;
-                    case OP_CSRRCI : csr_op = 1;
-                                     val = inst.i.rs1;
-                                     update = (inst.i.rs1 == 0) ? 0 : 1;
-                                     csr_type = OP_CSRRC;
-                                     break;
-                    case OP_CSRRC  : csr_op = 1;
-                                     val = regs[inst.i.rs1];
-                                     update = (inst.i.rs1 == 0) ? 0 : 1;
-                                     csr_type = OP_CSRRC;
-                                     break;
-                    default: printf("Unknown system instruction at 0x%08x\n", pc);
-                             TIME_LOG; TRACE_LOG "%08x %08x\n", pc, inst.inst TRACE_END;
-                             TRAP(TRAP_INST_ILL, inst.inst);
-                             continue;
-                }
-                if (csr_op) {
-                    int result = csr_rw(inst.i.imm, csr_type, val, update, &regs[inst.i.rd]);
                     TIME_LOG; TRACE_LOG "%08x %08x x%02u (%s) <= 0x%08x\n",
-                              pc, inst.inst, inst.i.rd,
-                              regname[inst.i.rd], regs[inst.i.rd] TRACE_END;
-                    if (!result) {
-                       TRAP(TRAP_INST_ILL, 0);
-                       continue;
-                    }
+                            pc, inst.inst, inst.i.rd, regname[inst.i.rd],
+                            regs[inst.i.rd] TRACE_END;
+                    break;
                 }
-                break;
+                case OP_ARITHR: { // R-Type
+                    if (inst.r.func7 == 1) { // RV32M Multiply Extension
+                        switch(inst.r.func3) {
+                            case OP_MUL   : regs[inst.r.rd] = regs[inst.r.rs1] *
+                                                            regs[inst.r.rs2];
+                                            break;
+                            case OP_MULH  : {
+                                            union {
+                                                long long l;
+                                                struct { int l, h; } n;
+                                            } a, b, r;
+                                            a.l = (long long)regs[inst.r.rs1];
+                                            b.l = (long long)regs[inst.r.rs2];
+                                            r.l = a.l * b.l;
+                                            regs[inst.r.rd] = r.n.h;
+                                            }
+                                            break;
+                            case OP_MULSU : {
+                                            union {
+                                                long long l;
+                                                struct { int l, h; } n;
+                                            } a, b, r;
+                                            a.l = (long long)regs[inst.r.rs1];
+                                            b.n.l = regs[inst.r.rs2];
+                                            b.n.h = 0;
+                                            r.l = a.l * b.l;
+                                            regs[inst.r.rd] = r.n.h;
+                                            }
+                                            break;
+                            case OP_MULU  : {
+                                            union {
+                                                long long l;
+                                                struct { int l, h; } n;
+                                            } a, b, r;
+                                            a.n.l = regs[inst.r.rs1]; a.n.h = 0;
+                                            b.n.l = regs[inst.r.rs2]; b.n.h = 0;
+                                            r.l = ((unsigned long long)a.l) *
+                                                ((unsigned long long)b.l);
+                                            regs[inst.r.rd] = r.n.h;
+                                            }
+                                            break;
+                            case OP_DIV   : if (regs[inst.r.rs2])
+                                                regs[inst.r.rd] = (int)(((long long)regs[inst.r.rs1]) /
+                                                                    regs[inst.r.rs2]);
+                                            else
+                                                regs[inst.r.rd] = 0xffffffff;
+                                            break;
+                            case OP_DIVU  : if (regs[inst.r.rs2])
+                                                regs[inst.r.rd] = (int)(((unsigned)regs[inst.r.rs1]) /
+                                                                        ((unsigned)regs[inst.r.rs2]));
+                                            else
+                                                regs[inst.r.rd] = 0xffffffff;
+                                            break;
+                            case OP_REM   : if (regs[inst.r.rs2])
+                                                regs[inst.r.rd] = (int)(((long long)regs[inst.r.rs1]) %
+                                                                        regs[inst.r.rs2]);
+                                            else
+                                                regs[inst.r.rd] = regs[inst.r.rs1];
+                                            break;
+                            case OP_REMU  : if (regs[inst.r.rs2])
+                                                regs[inst.r.rd] = (int)(((unsigned)regs[inst.r.rs1]) %
+                                                                        ((unsigned)regs[inst.r.rs2]));
+                                            else
+                                                regs[inst.r.rd] = regs[inst.r.rs1];
+                                            break;
+                            default: printf("Unknown instruction at 0x%08x\n", pc);
+                                    TRAP(TRAP_INST_ILL, inst.inst);
+                                    continue;
+                        }
+                    } else {
+                        switch(inst.r.func3) {
+                            case OP_ADD  : if (inst.r.func7 == 0)
+                                            regs[inst.r.rd] = regs[inst.r.rs1] + regs[inst.r.rs2];
+                                        else
+                                            regs[inst.r.rd] = regs[inst.r.rs1] - regs[inst.r.rs2];
+                                        break;
+                            case OP_SLL  : regs[inst.r.rd] = regs[inst.r.rs1] << regs[inst.r.rs2];
+                                        break;
+                            case OP_SLT  : regs[inst.r.rd] = regs[inst.r.rs1] < regs[inst.r.rs2] ?
+                                                            1 : 0;
+                                        break;
+                            case OP_SLTU : regs[inst.r.rd] = ((unsigned int)regs[inst.r.rs1]) <
+                                                ((unsigned int)regs[inst.r.rs2]) ? 1 : 0;
+                                        break;
+                            case OP_XOR  : regs[inst.r.rd] = regs[inst.r.rs1] ^ regs[inst.r.rs2];
+                                        break;
+                            case OP_SR   : if (inst.r.func7 == 0)
+                                            regs[inst.r.rd] = ((unsigned int)regs[inst.r.rs1]) >>
+                                                                regs[inst.r.rs2];
+                                        else
+                                            regs[inst.r.rd] = regs[inst.r.rs1] >> regs[inst.r.rs2];
+                                        break;
+                            case OP_OR   : regs[inst.r.rd] = regs[inst.r.rs1] | regs[inst.r.rs2];
+                                        break;
+                            case OP_AND  : regs[inst.r.rd] = regs[inst.r.rs1] & regs[inst.r.rs2];
+                                        break;
+                            default: printf("Unknown instruction at 0x%08x\n", pc);
+                                    TRAP(TRAP_INST_ILL, inst.inst);
+                                    continue;
+                        }
+                    }
+                    TIME_LOG; TRACE_LOG "%08x %08x x%02u (%s) <= 0x%08x\n",
+                            pc, inst.inst, inst.r.rd, regname[inst.r.rd],
+                            regs[inst.r.rd] TRACE_END;
+                    break;
+                }
+                case OP_FENCE : {
+                    TIME_LOG; TRACE_LOG "%08x %08x\n", pc, inst.inst TRACE_END;
+                    break;
+                }
+                case OP_SYSTEM: { // I-Type
+                    int val;
+                    int update;
+                    int csr_op = 0;
+                    int csr_type;
+                    // RDCYCLE, RDTIME and RDINSTRET are read only
+                    switch(inst.i.func3) {
+                        case OP_ECALL  : TIME_LOG; TRACE_LOG "%08x %08x\n", pc, inst.inst TRACE_END;
+                                        switch (inst.i.imm & 3) {
+                                            case 0: // ecall
+                                                switch(regs[A7]) { // function argument A7/X17
+                                                case SYS_EXIT:
+                                                    prog_exit(0);
+                                                    break;
+                                                case SYS_READ:
+                                                    if (regs[A0] == STDIN) {
+                                                        char *ptr = (char*)dmem;
+                                                        int i = 0;
+                                                        char c = 0;
+                                                        do {
+                                                            c = getch();
+                                                            ptr[DVA2PA(regs[A1])+i] = c;
+                                                        } while(++i<regs[A2] && c != '\n');
+                                                    }
+                                                    break;
+                                                case SYS_WRITE:
+                                                    if (regs[A0] == STDOUT) {
+                                                        char *ptr = (char*)dmem;
+                                                        int i;
+                                                        for(i=0; i<regs[A2]; i++) {
+                                                            char c = ptr[DVA2PA(regs[A1])+i];
+                                                            putchar(c);
+                                                        }
+                                                        fflush(stdout);
+                                                    }
+                                                    break;
+                                                case SYS_DUMP: {
+                                                        FILE *fp;
+                                                        int i;
+                                                        if ((fp = fopen("dump.txt", "w")) == NULL) {
+                                                            printf("Create dump.txt fail\n");
+                                                            exit(1);
+                                                        }
+                                                        if ((regs[A0] & 3) != 0 || (regs[A1] & 3) != 0) {
+                                                            printf("Alignment error on memory dumping.\n");
+                                                            exit(1);
+                                                        }
+                                                        for(i = DVA2PA(regs[A0])/4;
+                                                            i < DVA2PA(regs[A1])/4; i++) {
+                                                            fprintf(fp, "%08x\n", dmem[i]);
+                                                        }
+                                                        fclose(fp);
+                                                    }
+                                                    break;
+                                                default:
+                                                    break;
+                                                }
+                                                TRAP(TRAP_ECALL, 0);
+                                                continue;
+                                            case 1: // ebreak
+                                                TRAP(TRAP_BREAK, 0);
+                                                continue;
+                                            case 2: // mret
+                                                pc = csr.mepc;
+                                                // mstatus.mie = mstatus.mpie
+                                                csr.mstatus = (csr.mstatus & (1 << MPIE)) ?
+                                                            (csr.mstatus | (1 << MIE)) :
+                                                            (csr.mstatus & ~(1 << MIE));
+                                                // mstatus.mpie = 1
+                                                if ((pc&2) == 0)
+                                                    CYCLE_ADD(branch_penalty);
+                                                continue;
+                                            default:
+                                                printf("Illegal system call at PC 0x%08x\n", pc);
+                                                TRAP(TRAP_INST_ILL, 0);
+                                                continue;
+                                        }
+                        case OP_CSRRWI : csr_op = 1;
+                                        val = inst.i.rs1;
+                                        update = 1;
+                                        csr_type = OP_CSRRW;
+                                        break;
+                        // If the zimm[4:0] field is zero, then these instructions will not write
+                        // to the CSR
+                        case OP_CSRRW  : csr_op = 1;
+                                        val = regs[inst.i.rs1];
+                                        update = 1;
+                                        csr_type = OP_CSRRW;
+                                        break;
+                        // For both CSRRS and CSRRC, if rs1=x0, then the instruction will not
+                        // write to the CSR at all
+                        case OP_CSRRSI : csr_op = 1;
+                                        val = inst.i.rs1;
+                                        update = (inst.i.rs1 == 0) ? 0 : 1;
+                                        csr_type = OP_CSRRS;
+                                        break;
+                        case OP_CSRRS  : csr_op = 1;
+                                        val = regs[inst.i.rs1];
+                                        update = (inst.i.rs1 == 0) ? 0 : 1;
+                                        csr_type = OP_CSRRS;
+                                        break;
+                        case OP_CSRRCI : csr_op = 1;
+                                        val = inst.i.rs1;
+                                        update = (inst.i.rs1 == 0) ? 0 : 1;
+                                        csr_type = OP_CSRRC;
+                                        break;
+                        case OP_CSRRC  : csr_op = 1;
+                                        val = regs[inst.i.rs1];
+                                        update = (inst.i.rs1 == 0) ? 0 : 1;
+                                        csr_type = OP_CSRRC;
+                                        break;
+                        default: printf("Unknown system instruction at 0x%08x\n", pc);
+                                TIME_LOG; TRACE_LOG "%08x %08x\n", pc, inst.inst TRACE_END;
+                                TRAP(TRAP_INST_ILL, inst.inst);
+                                continue;
+                    }
+                    if (csr_op) {
+                        int result = csr_rw(inst.i.imm, csr_type, val, update, &regs[inst.i.rd]);
+                        TIME_LOG; TRACE_LOG "%08x %08x x%02u (%s) <= 0x%08x\n",
+                                pc, inst.inst, inst.i.rd,
+                                regname[inst.i.rd], regs[inst.i.rd] TRACE_END;
+                        if (!result) {
+                        TRAP(TRAP_INST_ILL, 0);
+                        continue;
+                        }
+                    }
+                    break;
+                }
+                default: {
+                    printf("Illegal instruction at PC 0x%08x\n", pc);
+                    TIME_LOG; TRACE_LOG "%08x %08x\n", pc, inst.inst TRACE_END;
+                    TRAP(TRAP_INST_ILL, inst.inst);
+                    continue;
+                }
             }
-            default: {
-                printf("Illegal instruction at PC 0x%08x\n", pc);
-                TIME_LOG; TRACE_LOG "%08x %08x\n", pc, inst.inst TRACE_END;
-                TRAP(TRAP_INST_ILL, inst.inst);
-                continue;
-            }
+            pc += 4; 
+            cnt++;
         }
-        pc+=4;
+        else {
+            printf("cop: %2x, cinst: %8x ", cinst.ci.op, cinst.cinst); 
+            int addd = 0;
+            switch(cinst.ci.op) {
+                case OP0 : {
+                    switch(cinst.ci.func3) {
+                        case OPC_ADDI4SPN : {   // CIW
+                            regs[cinst.ciw.rd] = regs[SP] + (cinst.ciw.imm << 2);
+                            break;
+                        }
+                    }
+                    break;
+                }
+                case OP1 : {      
+                    switch(cinst.ci.func3) {
+                        case OPC_ADDI : {   // CI
+                            addd = 2;
+                            printf("\nAAAAAADDDDDDDD   %d\n", addd);
+                            regs[cinst.ci.rd_rs1] += (cinst.ci.imm2 + (cinst.ci.imm1 << 4));
+                            if (cinst.ci.rd_rs1 == 0 || (cinst.ci.imm2 + cinst.ci.imm1) == 0)
+                                CYCLE_ADD(1);
+                            break;
+                        }
+                        case OPC_LI   : {   // CI
+                            if (cinst.ci.rd_rs1 == ZERO) {
+                                printf("Warning: rd of C.LI can't be ZERO\n");
+                                prog_exit(1);
+                            }
+                            regs[cinst.ci.rd_rs1] = to_imm_cli(cinst.ci.imm1, cinst.ci.imm2);
+                            break; 
+                        }
+                        case OPC_JAL  : {   // CJ
+                            regs[RA] = pc + 2;  // new PC
+                            TIME_LOG; TRACE_LOG "%08x %08x x%02u (%s) <= 0x%08x\n", pc, cinst.cinst,
+                                    RA, regname[RA], regs[RA] TRACE_END;
+                            pc += to_imm_cj(cinst.cj.imm);
+                            if (cinst.cj.imm == 0) {
+                                printf("Warning: forever loop detected at PC 0x%08x\n", pc);
+                                prog_exit(1);
+                            }
+                            if ((pc&1) == 0)
+                                CYCLE_ADD(branch_penalty);
+                            continue;
+                        }
+                        case OPC_J    : {   // CJ
+                            pc += to_imm_cj(cinst.cj.imm);
+                            if (cinst.cj.imm == 0) {
+                                printf("Warning: forever loop detected at PC 0x%08x\n", pc);
+                                prog_exit(1);
+                            }
+                            if ((pc&1) == 0)
+                                CYCLE_ADD(branch_penalty);
+                            continue;
+                        }
+                    }  
+                    break; 
+                } // case OP1
+                case OP2 : {
+                    switch(cinst.ci.func3) {
+                        case OPC_SWSP  : {   // CSS
+                            int address = regs[SP] + to_imm_cswsp(cinst.css.imm); 
+                            int data    = regs[cinst.css.rs2]; 
+                            if (address < DMEM_BASE || address > DMEM_BASE+DMEM_SIZE) {
+                                if (cinst.css.func3 == OPC_SWSP) 
+                                    TIME_LOG; TRACE_LOG "%08x %08x", pc, cinst.cinst TRACE_END;
+                            }
+
+                            //// TBD
+                            break;
+                        }
+                        case OPC_ARITH : {   // CR
+                            switch(cinst.cr.func4 & 1) {
+                                case 0 : {   // c.mv or c.jr
+                                    if (cinst.cr.rs2 != ZERO) {  // c.mv
+                                        regs[cinst.cr.rd_rs1] = cinst.cr.rs2;
+                                        break;
+                                    }
+                                    else  {  // c.jr
+                                        // TIME_LOG; TRACE_LOG "%08x ", pc TRACE_END;
+                                        pc =  regs[cinst.cr.rd_rs1];
+                                        if (cinst.cr.rd_rs1 == ZERO) {
+                                            printf("Warning: forever loop detected at PC 0x%08x\n", pc);
+		                                    prog_exit(1);
+                                        } 
+                                        if ((pc&1) == 0)
+                                            CYCLE_ADD(branch_penalty);
+                                        continue;
+                                    }
+                                }
+                                case 1 : {   // c.add or c.jalr
+                                    if (cinst.cr.rs2 != ZERO) {  // c.add
+                                        regs[cinst.cr.rd_rs1] += cinst.cr.rs2;
+                                        break;
+                                    }
+                                    else {   // c.jalr
+                                        pc = regs[cinst.cr.rd_rs1];
+                                        regs[RA] = pc + 2;  // new PC
+                                        if (cinst.cr.rd_rs1 == ZERO) {
+                                            printf("Warning: forever loop detected at PC 0x%08x\n", pc);
+                                            prog_exit(1);
+                                        } 
+                                        if ((pc&1) == 0)
+                                            CYCLE_ADD(branch_penalty);
+                                        continue;
+                                    }                    
+                                }
+                                
+                            } // switch
+                        }
+
+                    }
+                    break;
+                } // case OP2
+
+                default: {
+                    printf("Illegal instruction at PC 0x%08x\n %d \n", pc, addd);
+                    TIME_LOG; TRACE_LOG "%08x %08x\n", pc, cinst.cinst TRACE_END;
+                    TRAP(TRAP_INST_ILL, cinst.cinst);
+                    continue;
+                }
+            } // switch
+            pc += 2;  
+            c_cnt++;
+            printf("   ********%x", pc);           
+        }
+
     }
 
     aligned_free(imem);
     aligned_free(dmem);
     if (ft) fclose(ft);
+
+    puts("");
 }
 
