@@ -25,85 +25,6 @@
 #define __STDC_WANT_LIB_EXT1__ 1
 #endif
 
-typedef union _INSTC {
-    short int inst;
-
-    // byte order
-    struct {
-        char b0, b1;
-    } byte;
-
-    // CR-Type
-    struct {
-        unsigned int op    : 2;
-        unsigned int rs2   : 5;
-        unsigned int rd    : 5;
-        unsigned int func4 : 4;
-    } cr;
-
-    // CI-Type
-    struct {
-        unsigned int op    : 2;
-        unsigned int imm_l : 5;
-        unsigned int rd    : 5;
-        unsigned int imm_h : 1;
-        unsigned int func3 : 3;
-    } ci;
-
-    // CSS-Type
-    struct {
-        unsigned int op    : 2;
-        unsigned int rs2   : 5;
-        unsigned int imm   : 6;
-        unsigned int func3 : 3;
-    } css;
-
-    // CIW-Type
-    struct {
-        unsigned int op    : 2;
-        unsigned int rd_   : 3;
-        unsigned int imm   : 8;
-        unsigned int func3 : 3;
-    } ciw;
-
-    // CL-Type
-    struct {
-        unsigned int op    : 2;
-        unsigned int rd_   : 3;
-        unsigned int imm_l : 2;
-        unsigned int rs1_  : 3;
-        unsigned int imm_h : 3;
-        unsigned int func3 : 3;
-    } cl;
-
-    // CS-Type
-    struct {
-        unsigned int op    : 2;
-        unsigned int rs2_  : 3;
-        unsigned int imm_l : 2;
-        unsigned int rd_   : 3;
-        unsigned int imm_h : 3;
-        unsigned int func3 : 3;
-    } cs;
-
-    // CB-Type
-    struct {
-        unsigned int op    : 2;
-        unsigned int imm_l : 5;
-        unsigned int rs1_  : 3;
-        unsigned int imm_h : 3;
-        unsigned int func3 : 3;
-    } cb;
-
-    // CJ-Type
-    struct {
-        unsigned int op    : 2;
-        unsigned int offset: 11;
-        unsigned int func3 : 3;
-    } cj;
-
-} INSTC;
-
 typedef union _INST {
     int inst;
 
@@ -167,7 +88,7 @@ typedef union _INST {
 
 } INST;
 
-enum {
+enum {  // for INST
     OP_AUIPC   = 0x17,         // U-type
     OP_LUI     = 0x37,         // U-type
     OP_JAL     = 0x6f,         // J-type
@@ -235,6 +156,123 @@ enum {
     OP_CSRRSI  = 6,
     OP_CSRRCI  = 7
 };
+
+// ----- CINST -----
+typedef union _CINST {    
+    // for rv32c
+    short cinst;
+    struct {
+        char b0, b1;
+    } byte;
+
+    struct {    // CR-Type
+        unsigned int op     : 2;
+        unsigned int rs2    : 5;
+        unsigned int rd_rs1 : 5;
+        unsigned int func4  : 4;
+    } cr;
+
+    struct {    // CI-Type
+        unsigned int op     : 2;
+        unsigned int imm2   : 5;
+        unsigned int rd_rs1 : 5;  
+        unsigned int imm1   : 1;
+        unsigned int func3  : 3;   
+    } ci;
+
+    struct {    // CSS-Type
+        unsigned int op    : 2;
+        unsigned int rs2   : 5;
+        unsigned int imm   : 6;
+        unsigned int func3 : 3;
+    } css;
+
+    struct {    // CIW-Type
+        
+        unsigned int op    : 2;
+        unsigned int rd    : 3;
+        unsigned int imm   : 8;
+        unsigned int func3 : 3;
+    } ciw;
+
+    struct {    // CL-Type
+        unsigned int op    : 2;
+        unsigned int rd    : 3;
+        unsigned int imm2  : 2;
+        unsigned int rs1   : 3;
+        unsigned int imm1  : 3;
+        unsigned int func3 : 3;
+    } cl;
+
+    struct {    // CS-Type
+        unsigned int op     : 2;
+        unsigned int rs2    : 3;
+        unsigned int imm2   : 2;
+        unsigned int rd_rs1 : 3;
+        unsigned int imm1   : 3;
+        unsigned int func3  : 3;
+    } cs;
+
+    struct {    // CA-Type
+        unsigned int op     : 2;
+        unsigned int rs2    : 3;
+        unsigned int func2  : 2;
+        unsigned int rd_rs1 : 3; 
+        unsigned int func6  : 6; 
+    } ca;
+
+    struct {    // CB-Type
+        unsigned int op    : 2;
+        unsigned int imm2  : 5;
+        unsigned int rs1   : 3;
+        unsigned int imm1  : 3;
+        unsigned int func3 : 3;
+    } cb;
+
+    struct {    // CJ-Type
+        unsigned int op    : 2;
+        unsigned int imm   : 11;
+        unsigned int func3 : 3;
+    } cj;
+
+} CINST;
+
+enum {  // for CINST
+    OP0 = 0,
+    OP1 = 1,   
+    OP2 = 2
+};
+
+enum {
+    OPC_ARITH = 4
+};
+
+enum {  // j for CINST
+    OPC_JAL     = 1,
+    OPC_J       = 5
+};
+
+enum {  // add for CINST
+    OPC_ADDI     = 0,
+    OPC_ADDI4SPN = 0,
+    OPC_ADDI16SP = 3
+};
+
+enum {   
+    OPC_LWSP = 2,
+    OPC_SWSP = 6
+};
+
+enum {
+    OPC_LI  = 2,
+    OPC_LUI = 3 
+};
+
+enum {
+    OPC_LW = 2,
+    OPC_SW = 6
+};
+// -----------------
 
 enum {
     CSR_MVENDORID   = 0xF11,    // Vender ID
@@ -323,6 +361,7 @@ enum {
     S7 = 23, S8 = 24, S9 = 25, S10 = 26, S11 = 27, T3 = 28, T4 = 29,
     T5 = 30, T6 = 31
 };
+
 
 // mstatus register
 enum {
