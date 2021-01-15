@@ -228,14 +228,7 @@ static inline int to_imm_u(unsigned int n) {
     return (int)(n << 12);
 }
 
-static void prog_exit(int exitcode) {
-    if (!quiet) {
-        printf("\nExcuting %lld instructions, %lld cycles, %1.3f CPI\n", csr.instret.c,
-               csr.cycle.c, ((float)csr.cycle.c)/csr.instret.c);
-        printf("Program terminate\n");
-    }
-    exit(exitcode);
-}
+
 
 static inline int to_imm_cj(unsigned int n ) {
     unsigned int m;
@@ -264,6 +257,13 @@ static inline int to_imm_cli(unsigned int n1, unsigned int n2) {
     return (int) ((n1) ? (m | 0xffffffe0) : m);
 }
 
+static inline int to_imm_clui(unsigned int n1, unsigned int n2) {
+    unsigned int m1, m2;
+    m1 = (n1 << 17) + (n2 << 12);
+    m2 = (n1) ? (m1 | 0xfffe0000) : m1;
+    return (int) (m2 &= 0xfffff000); 
+}
+
 static inline int to_imm_cswsp(unsigned int n) {
     unsigned int m;
     union {
@@ -276,6 +276,15 @@ static inline int to_imm_cswsp(unsigned int n) {
     r.n = n;
     m = (r.m.a0 << 6) | (r.m.a1 << 2);
     return (int)  (m & 0x000000fc);  // zero extend
+}
+
+static void prog_exit(int exitcode) {
+    if (!quiet) {
+        printf("\nExcuting %lld instructions, %lld cycles, %1.3f CPI\n", csr.instret.c,
+               csr.cycle.c, ((float)csr.cycle.c)/csr.instret.c);
+        printf("Program terminate\n");
+    }
+    exit(exitcode);
 }
 
 // Use libbfd to read the elf file.
@@ -613,17 +622,16 @@ int main(int argc, char **argv) {
             lower  = imem[word_addr];
             higher = imem[word_addr + 1];
             in_mem = ( (lower >> 16) & 0x0000FFFF)  | ((higher << 16 ) & 0xFFFF0000);
-        } else { // word align 
+        } else {       // word align 
             in_mem = imem[word_addr];
         }
         // inst.inst =  imem[IVA2PA(pc)/4];
 
         chk_rv32c = in_mem & 0x3;
         if (chk_rv32c == 3)
-            inst.inst = in_mem;
+            inst.inst   = in_mem;
         else 
             cinst.cinst = in_mem & 0x0000ffff;
-            // printf("\n-->%8x\n", cinst.cinst);
          
         
         if ((csr.mtime.c >= csr.mtimecmp.c) &&
@@ -657,11 +665,11 @@ int main(int argc, char **argv) {
         CYCLE_ADD(1);
 
         prev_pc = pc;
-        if (j > 20) break;
-        j++;
+        // if (j > 65) break;
+        // j++;
         // if (pc == 0x2e) break;
 
-        printf("\n %d --- pc: %2x, ", chk_rv32c, pc);
+        printf("\n %d --- pc: %5x, ", chk_rv32c, pc);
         if(chk_rv32c == 3) {
             printf(" op: %2x,  inst: %8x ", inst.r.op, inst.inst); 
             switch(inst.r.op) {
@@ -1249,7 +1257,6 @@ int main(int argc, char **argv) {
         }
         else {
             printf("cop: %2x, cinst: %8x ", cinst.ci.op, cinst.cinst); 
-            int addd = 0;
             switch(cinst.ci.op) {
                 case OP0 : {
                     switch(cinst.ci.func3) {
@@ -1263,20 +1270,32 @@ int main(int argc, char **argv) {
                 case OP1 : {      
                     switch(cinst.ci.func3) {
                         case OPC_ADDI : {   // CI
-                            addd = 2;
-                            printf("\nAAAAAADDDDDDDD   %d\n", addd);
+                            if ((cinst.ci.imm2 + cinst.ci.imm1) == 0) {
+                                printf("Illegal instruction at PC 0x%08x\n", pc);
+                                prog_exit(1);
+                            }
                             regs[cinst.ci.rd_rs1] += (cinst.ci.imm2 + (cinst.ci.imm1 << 4));
-                            if (cinst.ci.rd_rs1 == 0 || (cinst.ci.imm2 + cinst.ci.imm1) == 0)
-                                CYCLE_ADD(1);
                             break;
                         }
                         case OPC_LI   : {   // CI
                             if (cinst.ci.rd_rs1 == ZERO) {
-                                printf("Warning: rd of C.LI can't be ZERO\n");
+                                printf("Illegal instruction at PC 0x%08x\n", pc);
                                 prog_exit(1);
                             }
                             regs[cinst.ci.rd_rs1] = to_imm_cli(cinst.ci.imm1, cinst.ci.imm2);
                             break; 
+                        }
+                        case OPC_LUI  : {   // CI
+                            if (cinst.ci.rd_rs1 == ZERO || cinst.ci.rd_rs1 == SP) {
+                                printf("Illegal instruction at PC 0x%08x\n", pc);
+                                prog_exit(1);
+                            }
+                            else if ((cinst.ci.imm2 + cinst.ci.imm1) == 0) {
+                                printf("Illegal instruction at PC 0x%08x\n", pc);
+                                prog_exit(1);
+                            }
+                            regs[cinst.ci.rd_rs1] = to_imm_clui(cinst.ci.imm1, cinst.ci.imm2);
+                            break;
                         }
                         case OPC_JAL  : {   // CJ
                             regs[RA] = pc + 2;  // new PC
@@ -1352,8 +1371,7 @@ int main(int argc, char **argv) {
                                             CYCLE_ADD(branch_penalty);
                                         continue;
                                     }                    
-                                }
-                                
+                                }          
                             } // switch
                         }
 
@@ -1362,7 +1380,7 @@ int main(int argc, char **argv) {
                 } // case OP2
 
                 default: {
-                    printf("Illegal instruction at PC 0x%08x\n %d \n", pc, addd);
+                    printf("Illegal instruction at PC 0x%08x\n", pc);
                     TIME_LOG; TRACE_LOG "%08x %08x\n", pc, cinst.cinst TRACE_END;
                     TRAP(TRAP_INST_ILL, cinst.cinst);
                     continue;
