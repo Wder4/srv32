@@ -160,7 +160,7 @@ enum {
 // ----- CINST -----
 typedef union _CINST {    
     // for rv32c
-    short cinst;
+    unsigned short cinst;
     struct {
         char b0, b1;
     } byte;
