@@ -245,6 +245,23 @@ enum {  // for CINST
 
 enum {
     OPC_ARITH = 4
+
+};
+
+enum {
+    OPC_SRLI  = 0,
+    OPC_SRAI  = 1,
+    OPC_ANDI  = 2,
+    OPC_LOGIC = 3, 
+    OPC_NRES  = 0,    
+    OPC_RES   = 1   // reserved
+};
+
+enum {
+    OPC_SUB = 0,
+    OPC_XOR = 1,
+    OPC_OR  = 2,
+    OPC_AND = 3
 };
 
 enum {  // j for CINST

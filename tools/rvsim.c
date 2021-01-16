@@ -278,6 +278,27 @@ static inline int to_imm_cswsp(unsigned int n) {
     return (int)  (m & 0x000000fc);  // zero extend
 }
 
+static inline int to_imm_csht(unsigned int n1, unsigned int n2) {
+    unsigned int m;
+    m = ((n1 & 0x4) << 3) + n2;
+    return (int) m;
+}
+
+static inline int to_imm_candi(unsigned int n1, unsigned int n2) {
+    unsigned int m, first, chk;
+    first = n1 & 0x4;
+    m = (first << 3) + n2;
+    chk = (first >> 2) & 0x1;
+    return (int) (chk ? (m | 0xffffffe0) : m);
+}
+
+static inline int to_sign_csra(unsigned int n) {
+    int idx  = 32 - __builtin_clz(n) - 1;
+    int tail = (n >> idx) & 1;
+    int mask = 0xffffffff << (idx + 1);
+    return (int) (tail ? (n | mask) : n);
+}
+
 static void prog_exit(int exitcode) {
     if (!quiet) {
         printf("\nExcuting %lld instructions, %lld cycles, %1.3f CPI\n", csr.instret.c,
@@ -1269,7 +1290,7 @@ int main(int argc, char **argv) {
                 }
                 case OP1 : {      
                     switch(cinst.ci.func3) {
-                        case OPC_ADDI : {   // CI
+                        case OPC_ADDI  : {   // CI
                             if ((cinst.ci.imm2 + cinst.ci.imm1) == 0) {
                                 printf("Illegal instruction at PC 0x%08x\n", pc);
                                 prog_exit(1);
@@ -1277,7 +1298,7 @@ int main(int argc, char **argv) {
                             regs[cinst.ci.rd_rs1] += (cinst.ci.imm2 + (cinst.ci.imm1 << 4));
                             break;
                         }
-                        case OPC_LI   : {   // CI
+                        case OPC_LI    : {   // CI
                             if (cinst.ci.rd_rs1 == ZERO) {
                                 printf("Illegal instruction at PC 0x%08x\n", pc);
                                 prog_exit(1);
@@ -1285,7 +1306,7 @@ int main(int argc, char **argv) {
                             regs[cinst.ci.rd_rs1] = to_imm_cli(cinst.ci.imm1, cinst.ci.imm2);
                             break; 
                         }
-                        case OPC_LUI  : {   // CI
+                        case OPC_LUI   : {   // CI
                             if (cinst.ci.rd_rs1 == ZERO || cinst.ci.rd_rs1 == SP) {
                                 printf("Illegal instruction at PC 0x%08x\n", pc);
                                 prog_exit(1);
@@ -1297,7 +1318,7 @@ int main(int argc, char **argv) {
                             regs[cinst.ci.rd_rs1] = to_imm_clui(cinst.ci.imm1, cinst.ci.imm2);
                             break;
                         }
-                        case OPC_JAL  : {   // CJ
+                        case OPC_JAL   : {   // CJ
                             regs[RA] = pc + 2;  // new PC
                             TIME_LOG; TRACE_LOG "%08x %08x x%02u (%s) <= 0x%08x\n", pc, cinst.cinst,
                                     RA, regname[RA], regs[RA] TRACE_END;
@@ -1310,7 +1331,7 @@ int main(int argc, char **argv) {
                                 CYCLE_ADD(branch_penalty);
                             continue;
                         }
-                        case OPC_J    : {   // CJ
+                        case OPC_J     : {   // CJ
                             pc += to_imm_cj(cinst.cj.imm);
                             if (cinst.cj.imm == 0) {
                                 printf("Warning: forever loop detected at PC 0x%08x\n", pc);
@@ -1319,6 +1340,38 @@ int main(int argc, char **argv) {
                             if ((pc&1) == 0)
                                 CYCLE_ADD(branch_penalty);
                             continue;
+                        }
+                        case OPC_ARITH : {
+                            switch(cinst.ca.func6 & 0xfffffffe) {
+                                case OPC_SRLI : {  // CB
+                                    int sht = to_imm_csht(cinst.cb.imm1, cinst.cb.imm2);
+                                    if ( sht == 0) {
+                                        printf("Illegal instruction at PC 0x%08x\n", pc);
+                                        prog_exit(1);
+                                    }
+                                    regs[cinst.cb.rs1] = regs[cinst.cb.rs1] >> sht;
+                                    break;
+                                }
+                                case OPC_SRAI : {  // CB
+                                    int sht = to_imm_csht(cinst.cb.imm1, cinst.cb.imm2);
+                                    if ( sht == 0) {
+                                        printf("Illegal instruction at PC 0x%08x\n", pc);
+                                        prog_exit(1);
+                                    }
+                                    unsigned int m;
+                                    m = regs[cinst.cb.rs1] >> sht;
+                                    regs[cinst.cb.rs1] = to_sign_csra(m);
+                                    break;
+                                }
+                                case OPC_ANDI     : {  // CB
+                                    regs[cinst.cb.rs1] &= to_imm_candi(cinst.cb.imm1, cinst.cb.imm2);
+                                    break;
+                                }
+                                case OPC_LOGIC    : {
+                                    //// TBD
+                                    break;
+                                }
+                            }
                         }
                     }  
                     break; 
